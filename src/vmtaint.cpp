@@ -27,29 +27,22 @@ char stack_memory[STACK_MEMORY_SIZE];
 static void run_taint(addr_t ip, const unsigned char* buf, uint8_t size)
 {
     Instruction inst;
-
-    cout << hex << ip << "\t";
-
+    
     try {
         inst.setOpcode(buf, size);
         inst.setAddress(ip);
         triton_api.processing(inst);
-        cout << inst.getDisassembly() << endl;
 
-        /*
-        unordered_set<triton::uint64> tainted_mem = triton_api.getTaintedMemory();
+        // Get callee address from instruction
+        std::string disassembly = inst.getDisassembly();
+        if (disassembly.find("call") != string::npos) {
+            // split string
+            std::string instruction, operand;
+            std::stringstream disassembly_stream(disassembly);
+            disassembly_stream >> instruction >> operand;
 
-        for (auto itr = tainted_mem.begin(); itr != tainted_mem.end(); ++itr)
-            cout << "\t Tainted mem: " << hex << *itr << endl;
-        */
-
-        unordered_set<const triton::arch::Register *> tainted_regs = triton_api.getTaintedRegisters();
-
-        for (auto itr = tainted_regs.begin(); itr != tainted_regs.end(); ++itr)
-        {
-            const triton::arch::Register *reg = *itr;
-            if ( (*itr)->getId() != ID_REG_INVALID && (*itr)->getSize() )
-                cout << "\t Tainted reg: " << reg->getName() << ": " << hex << triton_api.getConcreteRegisterValue(*reg) << endl;
+            // get second token, will be (xxx from 'call xxx' instruction)
+            std::cout << "Affected function " << operand << std::endl;
         }
     } catch (...) {
         cout << "error running taint on instruction ";
