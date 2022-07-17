@@ -75,7 +75,7 @@ static bool load_state(const char *filepath)
     return true;
 }
 
-static bool process_data(const char *filepath)
+static bool process_data(const char *filepath, bool show_taints, bool show_functions)
 {
     // for now taint rdi register (1st arg)
     triton_api.taintRegister(triton_api.registers.x86_rdi);
@@ -84,11 +84,12 @@ static bool process_data(const char *filepath)
     char line[256];
     set<string> addr_set;
 
-    cout << "[Tainted Disassembly::START]" << endl;
+    if (show_taints)
+        cout << "[Tainted Disassembly::START]" << endl;
     while (fgets(line, sizeof(line), file)) {
         const char delim[2] = ";";
         char *token, *addr;
-        // char *insn, *operands
+        //char *insn, *operands;
         char *hex;
         
         token = strtok(line, delim);
@@ -112,7 +113,8 @@ static bool process_data(const char *filepath)
         inst.setAddress(strtoull(addr, NULL, 16));
         triton_api.processing(inst);
         string disass = inst.getDisassembly();
-        cout << addr << "\t" << disass << endl;
+        if (show_taints)
+            cout << addr << "\t" << disass << endl;
 
         unordered_set<const triton::arch::Register *> tainted_regs = triton_api.getTaintedRegisters();
 
@@ -120,7 +122,8 @@ static bool process_data(const char *filepath)
         {
             const triton::arch::Register *reg = *itr;
             if ( (*itr)->getId() != ID_REG_INVALID && (*itr)->getSize() ) {
-                cout << "\t Tainted reg: " << reg->getName() << ": " << triton_api.getConcreteRegisterValue(*reg) << endl;
+                if (show_taints)
+                    cout << "\t Tainted reg: " << reg->getName() << ": " << triton_api.getConcreteRegisterValue(*reg) << endl;
                 size_t pos = disass.find("call ");
                 if (pos != string::npos) {
                     string affected_func = disass.substr(pos + 5);
@@ -129,20 +132,26 @@ static bool process_data(const char *filepath)
             }
         }
     }
-    cout << "[Tainted Disassembly::END]" << endl;
+    if (show_taints)
+        cout << "[Tainted Disassembly::END]" << endl;
 
     fclose(file);
-    cout << endl << endl;
-    cout << "[Affected Functions::START]" << endl;
-    if (addr_set.size() > 0) {
-        for (string const& addr : addr_set)
-        {
-            std::cout << addr << endl;
-        } 
-    } else {
-        std::cout << "None" << endl;
+
+    if (show_functions) {
+        if (show_taints)
+            cout << endl << endl;
+
+        cout << "[Affected Functions::START]" << endl;
+        if (addr_set.size() > 0) {
+            for (string const& addr : addr_set)
+            {
+                std::cout << addr << endl;
+            } 
+        } else {
+            std::cout << "None" << endl;
+        }
+        cout << "[Affected functions::END]" << endl;
     }
-    cout << "[Affected functions::END]" << endl;
     return true;
 }
 
@@ -151,36 +160,35 @@ int main(int argc, char *const *argv)
     int c, long_index = 0;
     const struct option long_opts[] =
     {
-        {"taint", required_argument, NULL, 't'},
         {"load-state", required_argument, NULL, 's'},
         {"load-data", required_argument, NULL, 'd'},
+        {"show-taints", no_argument, NULL, 't'},
+        {"show-functions", no_argument, NULL, 'f'},
         {NULL, 0, NULL, 0}
     };
-    const char* opts = "t:s:d";
+    const char* opts = "s:d:tf";
     const char* statefile = NULL;
     const char* datafile = NULL;
+    bool show_taints = false;
+    bool show_functions = false;
     vector<struct taint_address> taint_addresses;
 
     while ((c = getopt_long (argc, argv, opts, long_opts, &long_index)) != -1)
     {
         switch(c)
         {
-        case 't':
-        {
-            string s(optarg);
-            size_t pos = s.find(":");
-            addr_t address = strtoull(s.substr(0, pos).c_str(), NULL, 0);
-            size_t size = pos ? strtoull(s.substr(pos+1, s.length()).c_str(), NULL, 0) : 1;
-
-            taint_addresses.push_back({address, size});
-            break;
-        }
         case 's':
             statefile = optarg;
             break;
         case 'd':
             datafile = optarg;
-            break;      
+            break;
+        case 't':
+            show_taints = true;
+            break;    
+        case 'f':
+            show_functions = true;
+            break;        
         default:
             return -1;
         };
@@ -208,7 +216,7 @@ int main(int argc, char *const *argv)
         return -1;
     }
 
-    if ( !process_data(datafile) )
+    if ( !process_data(datafile, show_taints, show_functions) )
     {
         cout << "Unable to process data file" << endl;
         return -1;
