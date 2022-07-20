@@ -152,28 +152,28 @@ static bool process_data(const char *filepath, bool show_disassembly, bool show_
             regs = regs.substr(0, regs.length() - 1);
         regs.append("]");
 
-        if (tainted_regs.size() > 0) {
-            size_t pos = disass.find("call ");
-            if (pos != string::npos) {
-                string affected_func = disass.substr(pos + 5);
-                if (show_functions_regs) {
+        size_t pos = disass.find("call ");
+        if (pos != string::npos) {
+            string affected_func = disass.substr(pos + 5);
+            if (show_functions_regs) {
+                if (tainted_regs.size() > 0) {
                     affected_func.append(" ");
                     affected_func.append(regs);
                 }
-                if (show_functions_stack) {
-                    if (tainted_mem.size() > 0) {
-                        affected_func.append("\n");
-                        for (auto itr = tainted_mem.begin(); itr != tainted_mem.end(); ++itr) {
-                            std::stringstream sstream;
-                            sstream << "\t0x" << hex << *itr;
-                            sstream << " 0x" << std::setfill('0') << std::setw(2) << unsigned(triton_api.getConcreteMemoryValue(*itr)) << endl;
-                            affected_func.append(sstream.str());
-                        }
-                        affected_func = affected_func.substr(0, affected_func.length() - 1);
-                    }
-                }
-                addr_set.insert(affected_func);
             }
+            if (show_functions_stack) {
+                if (tainted_mem.size() > 0) {
+                    affected_func.append("\n");
+                    for (auto itr = tainted_mem.begin(); itr != tainted_mem.end(); ++itr) {
+                        std::stringstream sstream;
+                        sstream << "\t0x" << hex << *itr;
+                        sstream << " 0x" << std::setfill('0') << std::setw(2) << unsigned(triton_api.getConcreteMemoryValue(*itr)) << endl;
+                        affected_func.append(sstream.str());
+                    }
+                    affected_func = affected_func.substr(0, affected_func.length() - 1);
+                }
+            }
+            addr_set.insert(affected_func);
         }
     }
     if (show_disassembly)
