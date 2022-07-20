@@ -173,7 +173,8 @@ static bool process_data(const char *filepath, bool show_disassembly, bool show_
                     affected_func = affected_func.substr(0, affected_func.length() - 1);
                 }
             }
-            addr_set.insert(affected_func);
+            if (tainted_regs.size() > 0 || tainted_mem.size() > 0)
+                addr_set.insert(affected_func);
         }
     }
     if (show_disassembly)
