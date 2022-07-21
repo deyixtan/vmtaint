@@ -11,6 +11,7 @@ using namespace triton::arch;
 using namespace triton::arch::x86;
 triton::API triton_api;
 
+static vmi_instance_t vmi;
 #define STACK_MEMORY_SIZE 0x1000
 char stack_memory[STACK_MEMORY_SIZE];
 
@@ -19,7 +20,49 @@ struct taint_address {
     size_t size;
 };
 
-static bool load_state(const char *filepath)
+static bool save_state(const char *filepath, vector<struct taint_address> taint_addresses)
+{
+    registers_t regs;
+    memset(&regs, 0, sizeof(regs));
+
+    vmi_get_vcpuregs(vmi, &regs, 0);
+
+    FILE *i = fopen(filepath, "w+");
+    if ( !i )
+        return false;
+
+    fwrite(&regs, sizeof(regs), 1, i);
+
+    ACCESS_CONTEXT(ctx);
+    ctx.translate_mechanism = VMI_TM_PROCESS_DTB;
+    ctx.dtb = regs.x86.cr3;
+    ctx.addr = regs.x86.rbp - sizeof(stack_memory);
+
+    size_t sz = 0;
+    vmi_read(vmi, &ctx, sizeof(stack_memory), reinterpret_cast<uint8_t*>(stack_memory), &sz);
+
+    fwrite(stack_memory, 1, sizeof(stack_memory), i);
+
+    // save tainted buffer
+    for (unsigned int j = 0; j < taint_addresses.size(); j++)
+    {
+        ACCESS_CONTEXT(ctx);
+        ctx.translate_mechanism = VMI_TM_PROCESS_DTB;
+        ctx.dtb = regs.x86.cr3;
+        ctx.addr = taint_addresses[j].address;
+
+        size_t sz = 0;
+        char buf[taint_addresses[j].size];
+        vmi_read(vmi, &ctx, sizeof(buf), reinterpret_cast<uint8_t*>(buf), &sz);
+
+        fwrite(buf, 1, sizeof(buf), i);   
+    }
+
+    fclose(i);
+    return true;
+}
+
+static bool load_state(const char *filepath, vector<struct taint_address> taint_addresses)
 {
     x86_registers_t regs;
     memset(&regs, 0, sizeof(regs));
@@ -71,6 +114,25 @@ static bool load_state(const char *filepath)
         triton_api.setConcreteMemoryValue(addr, stack_memory[index++]);
     }
 
+    // load tainted buffer
+    for (unsigned int j = 0; j < taint_addresses.size(); j++)
+    {
+        char buf[taint_addresses[j].size];
+        read = fread(buf, 1, sizeof(buf), i);
+
+        if( read != sizeof(buf) )
+        {
+            fclose(i);
+            return false;
+        }
+
+        addr_t index = 0;
+        for ( addr_t addr = taint_addresses[j].address; addr < taint_addresses[j].address + sizeof(buf); addr++)
+        {
+            triton_api.setConcreteMemoryValue(addr, buf[index++]);
+        }
+    }
+
     fclose(i);
     return true;
 }
@@ -78,9 +140,6 @@ static bool load_state(const char *filepath)
 static bool process_data(const char *filepath, bool show_disassembly, bool show_disassembly_regs, bool show_disassembly_stack,
     bool show_functions, bool show_functions_regs, bool show_functions_stack)
 {
-    // // for now taint rdi register (1st arg)
-    // triton_api.taintRegister(triton_api.registers.x86_rdi);
-
     FILE* file = fopen(filepath, "r");
     char line[256];
     set<string> addr_set;
@@ -205,18 +264,22 @@ int main(int argc, char *const *argv)
     int c, long_index = 0;
     const struct option long_opts[] =
     {
-        {"load-state", required_argument, NULL, 'a'},
-        {"load-data", required_argument, NULL, 'b'},
-        {"taint", required_argument, NULL, 'c'},
-        {"show-disassembly", no_argument, NULL, 'd'},
-        {"show-disassembly-regs", no_argument, NULL, 'e'},
-        {"show-disassembly-stack", no_argument, NULL, 'f'},
-        {"show-functions", no_argument, NULL, 'g'},
-        {"show-functions-regs", no_argument, NULL, 'h'},
-        {"show-functions-stack", no_argument, NULL, 'i'},
+        {"domid", required_argument, NULL, 'a'},
+        {"save-state", required_argument, NULL, 'b'},
+        {"load-state", required_argument, NULL, 'c'},
+        {"load-data", required_argument, NULL, 'd'},
+        {"taint", required_argument, NULL, 'e'},
+        {"show-disassembly", no_argument, NULL, 'f'},
+        {"show-disassembly-regs", no_argument, NULL, 'g'},
+        {"show-disassembly-stack", no_argument, NULL, 'h'},
+        {"show-functions", no_argument, NULL, 'i'},
+        {"show-functions-regs", no_argument, NULL, 'j'},
+        {"show-functions-stack", no_argument, NULL, 'k'},
         {NULL, 0, NULL, 0}
     };
     const char* opts = "a:b:cdefgh";
+    uint64_t domid = 0;
+    bool save = false;
     const char* statefile = NULL;
     const char* datafile = NULL;
     bool show_disassembly = false;
@@ -232,12 +295,19 @@ int main(int argc, char *const *argv)
         switch(c)
         {
         case 'a':
-            statefile = optarg;
+            domid = strtoull(optarg, NULL, 0);
             break;
         case 'b':
-            datafile = optarg;
+            save = true;
+            statefile = optarg;
             break;
         case 'c':
+            statefile = optarg;
+            break;
+        case 'd':
+            datafile = optarg;
+            break;
+        case 'e':
         {
             string s(optarg);
             size_t pos = s.find(":");
@@ -247,22 +317,22 @@ int main(int argc, char *const *argv)
             taint_addresses.push_back({address, size});
             break;
         }
-        case 'd':
+        case 'f':
             show_disassembly = true;
             break;    
-        case 'e':
+        case 'g':
             show_disassembly_regs = true;
             break;    
-        case 'f':
+        case 'h':
             show_disassembly_stack = true;
             break;    
-        case 'g':
+        case 'i':
             show_functions = true;
             break;  
-        case 'h':
+        case 'j':
             show_functions_regs = true;
             break;  
-        case 'i':
+        case 'k':
             show_functions_stack = true;
             break;        
         default:
@@ -270,10 +340,33 @@ int main(int argc, char *const *argv)
         };
     }
 
+
     if ( !statefile )
     {
         cout << "No state file specified" << endl;
         return -1;
+    }
+
+    if ( save )
+    {
+        if ( !domid )
+        {
+            cout << "No domid specified\n" << endl;
+            return -1;
+        }
+    }
+
+    if ( VMI_FAILURE == vmi_init(&vmi, VMI_XEN, &domid, VMI_INIT_DOMAINID, NULL, NULL) )
+        return -1;
+
+    vmi_init_paging(vmi, 0);
+
+    if ( save )
+    {
+        cout << "Saving state" << endl;
+        save_state(statefile, taint_addresses);
+        vmi_destroy(vmi);
+        return 0;
     }
 
     if ( !datafile )
@@ -286,7 +379,7 @@ int main(int argc, char *const *argv)
     triton_api.enableTaintEngine(1);
     triton_api.enableSymbolicEngine(0);
 
-    if ( !load_state(statefile) )
+    if ( !load_state(statefile, taint_addresses) )
     {
         cout << "Unable to load state file" << endl;
         return -1;
