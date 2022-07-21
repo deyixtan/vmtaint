@@ -78,8 +78,8 @@ static bool load_state(const char *filepath)
 static bool process_data(const char *filepath, bool show_disassembly, bool show_disassembly_regs, bool show_disassembly_stack,
     bool show_functions, bool show_functions_regs, bool show_functions_stack)
 {
-    // for now taint rdi register (1st arg)
-    triton_api.taintRegister(triton_api.registers.x86_rdi);
+    // // for now taint rdi register (1st arg)
+    // triton_api.taintRegister(triton_api.registers.x86_rdi);
 
     FILE* file = fopen(filepath, "r");
     char line[256];
@@ -207,12 +207,13 @@ int main(int argc, char *const *argv)
     {
         {"load-state", required_argument, NULL, 'a'},
         {"load-data", required_argument, NULL, 'b'},
-        {"show-disassembly", no_argument, NULL, 'c'},
-        {"show-disassembly-regs", no_argument, NULL, 'd'},
-        {"show-disassembly-stack", no_argument, NULL, 'e'},
-        {"show-functions", no_argument, NULL, 'f'},
-        {"show-functions-regs", no_argument, NULL, 'g'},
-        {"show-functions-stack", no_argument, NULL, 'h'},
+        {"taint", required_argument, NULL, 'c'},
+        {"show-disassembly", no_argument, NULL, 'd'},
+        {"show-disassembly-regs", no_argument, NULL, 'e'},
+        {"show-disassembly-stack", no_argument, NULL, 'f'},
+        {"show-functions", no_argument, NULL, 'g'},
+        {"show-functions-regs", no_argument, NULL, 'h'},
+        {"show-functions-stack", no_argument, NULL, 'i'},
         {NULL, 0, NULL, 0}
     };
     const char* opts = "a:b:cdefgh";
@@ -237,21 +238,31 @@ int main(int argc, char *const *argv)
             datafile = optarg;
             break;
         case 'c':
+        {
+            string s(optarg);
+            size_t pos = s.find(":");
+            addr_t address = strtoull(s.substr(0, pos).c_str(), NULL, 0);
+            size_t size = pos ? strtoull(s.substr(pos+1, s.length()).c_str(), NULL, 0) : 1;
+
+            taint_addresses.push_back({address, size});
+            break;
+        }
+        case 'd':
             show_disassembly = true;
             break;    
-        case 'd':
+        case 'e':
             show_disassembly_regs = true;
             break;    
-        case 'e':
+        case 'f':
             show_disassembly_stack = true;
             break;    
-        case 'f':
+        case 'g':
             show_functions = true;
             break;  
-        case 'g':
+        case 'h':
             show_functions_regs = true;
             break;  
-        case 'h':
+        case 'i':
             show_functions_stack = true;
             break;        
         default:
@@ -279,6 +290,13 @@ int main(int argc, char *const *argv)
     {
         cout << "Unable to load state file" << endl;
         return -1;
+    }
+
+    for (unsigned int i = 0; i < taint_addresses.size(); i++)
+    {
+        cout << "Tainting memory at 0x" << hex << taint_addresses[i].address << " + " << taint_addresses[i].size << endl;
+        for (unsigned int s = 0; s < taint_addresses[i].size; s++ )
+            triton_api.taintMemory(taint_addresses[i].address + s);
     }
 
     if ( !process_data(datafile, show_disassembly, show_disassembly_regs, show_disassembly_stack,
