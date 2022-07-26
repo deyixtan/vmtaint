@@ -98,7 +98,10 @@ static bool load_state(const char *filepath, vector<struct taint_address> taint_
     triton_api.setConcreteRegisterValue(triton_api.getRegister("r15"), regs.r15);
     triton_api.setConcreteRegisterValue(triton_api.getRegister("eflags"), regs.rflags);
     triton_api.setConcreteRegisterValue(triton_api.getRegister("fs"), regs.fs_base);
-    triton_api.setConcreteRegisterValue(triton_api.getRegister("gs"), regs.fs_base);
+    triton_api.setConcreteRegisterValue(triton_api.getRegister("cr0"), regs.cr0);
+    triton_api.setConcreteRegisterValue(triton_api.getRegister("cr2"), regs.cr2);
+    triton_api.setConcreteRegisterValue(triton_api.getRegister("cr3"), regs.cr3);
+    triton_api.setConcreteRegisterValue(triton_api.getRegister("cr4"), regs.cr4);
 
     read = fread(stack_memory, 1, sizeof(stack_memory), i);
 
@@ -137,51 +140,74 @@ static bool load_state(const char *filepath, vector<struct taint_address> taint_
     return true;
 }
 
-static bool process_data(const char *filepath, bool show_disassembly, bool show_disassembly_regs, bool show_disassembly_stack,
-    bool show_functions, bool show_functions_regs, bool show_functions_stack)
+vector<string> split(string str, string token){
+    vector<string>result;
+    while(str.length()){
+        int index = str.find(token);
+        if(index!=string::npos){
+            result.push_back(str.substr(0,index));
+            str = str.substr(index+token.size());
+            if(str.length()==0)result.push_back(str);
+        }else{
+            result.push_back(str);
+            str = "";
+        }
+    }
+    return result;
+}
+
+static bool process_data(const char *filepath, bool show_disassembly, bool show_disassembly_regs, bool show_disassembly_mem,
+    bool show_functions, bool show_functions_regs, bool show_functions_mem)
 {
     FILE* file = fopen(filepath, "r");
-    char line[256];
-    set<string> addr_set;
+    char line[1024];
+    vector<string> addr_list;
 
     if (show_disassembly)
         cout << "[Tainted Disassembly::START]" << endl;
-    while (fgets(line, sizeof(line), file)) {
-        const char delim[2] = ";";
-        char *token, *addr;
-        //char *insn, *operands;
-        char *hexbytes;
-        
-        token = strtok(line, delim);
-        addr = token;
-        token = strtok(NULL, delim);
-        //insn = token;
-        token = strtok(NULL, delim);
-        //operands = token;
-        token = strtok(NULL, delim);
-        hexbytes = token;
 
-        Instruction inst;
-        string tmp;
-        stringstream ss(hexbytes);
+    vector<string> lines;
+    while (fgets(line, sizeof(line), file)) {
+        lines.push_back(line);
+    }
+
+    for (int i = 0; i < lines.size(); i++) {
+        vector<string> stepper_output = split(lines[i], ";");
+        if (stepper_output.size() != 5)
+            continue;
+        string addr = stepper_output.at(0);
+        string insn = stepper_output.at(1);
+        string operands = stepper_output.at(2);
+        string hexbytes = stepper_output.at(3);
+        string regs_tmp = stepper_output.at(4);
+
+        vector<string> hexbytes_list = split(hexbytes, " ");
         vector<unsigned char> bytes;
-        while (getline(ss, tmp, ' ')) {
-            bytes.push_back(strtoul(tmp.c_str(), NULL, 16));
+        for (int i = 0; i < hexbytes_list.size(); i++) {
+            bytes.push_back(strtoul(hexbytes_list[i].c_str(), NULL, 16));
         }
 
+        vector<string> regs_tmp_list = split(regs_tmp, ",");
+        for (int i = 0; i < regs_tmp_list.size(); i++) {
+            vector<string> regs_tmp_single = split(regs_tmp_list[i], "=");
+            triton_api.setConcreteRegisterValue(triton_api.getRegister(regs_tmp_single[0]), strtoull(regs_tmp_single[1].c_str(), NULL, 16));
+        }
+
+        Instruction inst;
         inst.setOpcode(bytes.data(), bytes.size());
-        inst.setAddress(strtoull(addr, NULL, 16));
+        inst.setAddress(strtoull(addr.c_str(), NULL, 16));    
         triton_api.processing(inst);
-        
+
         string disass = inst.getDisassembly();
 
         unordered_set<triton::uint64> tainted_mem = triton_api.getTaintedMemory();
         unordered_set<const triton::arch::Register *> tainted_regs = triton_api.getTaintedRegisters();
         string regs;
 
+        // process current instruction (for disassembly)
         if (show_disassembly) {
             cout << addr << "\t" << disass << endl;
-            if (show_disassembly_stack) {
+            if (show_disassembly_mem) {
                 for (auto itr = tainted_mem.begin(); itr != tainted_mem.end(); ++itr) {
                     cout << "\t Tainted mem: 0x" << hex << *itr;
                     cout << " 0x" << std::setfill('0') << std::setw(2) << unsigned(triton_api.getConcreteMemoryValue(*itr)) << endl;
@@ -206,6 +232,37 @@ static bool process_data(const char *filepath, bool show_disassembly, bool show_
                     cout << "\t Tainted reg: " << reg->getName() << ": " << std::hex << "0x" << triton_api.getConcreteRegisterValue(*reg) << endl;
             }
         }
+
+        // check for call insns that have ptr to tainted buffer
+        size_t pos_tmp = disass.find("call ");
+        if (pos_tmp != string::npos) {
+            const Register rcx = triton_api.getRegister("rcx");
+            const Register rdx = triton_api.getRegister("rdx");
+            const Register r8 = triton_api.getRegister("r8");
+            const Register r9 = triton_api.getRegister("r9");
+            vector<Register> regs_list;
+            regs_list.push_back(rcx);
+            regs_list.push_back(rdx);
+            regs_list.push_back(r8);
+            regs_list.push_back(r9);
+
+            for (const Register r : regs_list) {
+                if (!triton_api.isRegisterTainted2(r)) {
+                    uint64 addr = (uint64)triton_api.getConcreteRegisterValue(r);
+                    if (triton_api.isMemoryTainted2(addr)) {
+                        std::stringstream sstream;
+                        sstream << std::hex << addr;
+                        regs.append(r.getName());
+                        regs.append("=0x");
+                        regs.append(sstream.str());
+                        regs.append(",");
+
+                        if (show_disassembly && show_disassembly_regs)
+                            cout << "\t Tainted reg*: " << r.getName() << ": " << std::hex << "0x" << triton_api.getConcreteRegisterValue(r) << endl;
+                    }
+                }
+            }
+        }
         
         if (regs.length() > 1) // only substr if there is at least 1 reg tainted
             regs = regs.substr(0, regs.length() - 1);
@@ -220,7 +277,7 @@ static bool process_data(const char *filepath, bool show_disassembly, bool show_
                     affected_func.append(regs);
                 }
             }
-            if (show_functions_stack) {
+            if (show_functions_mem) {
                 if (tainted_mem.size() > 0) {
                     affected_func.append("\n");
                     for (auto itr = tainted_mem.begin(); itr != tainted_mem.end(); ++itr) {
@@ -233,7 +290,7 @@ static bool process_data(const char *filepath, bool show_disassembly, bool show_
                 }
             }
             if (tainted_regs.size() > 0 || tainted_mem.size() > 0)
-                addr_set.insert(affected_func);
+                addr_list.push_back(affected_func);
         }
     }
     if (show_disassembly)
@@ -246,8 +303,8 @@ static bool process_data(const char *filepath, bool show_disassembly, bool show_
             cout << endl << endl;
 
         cout << "[Affected Functions::START]" << endl;
-        if (addr_set.size() > 0) {
-            for (string const& addr : addr_set)
+        if (addr_list.size() > 0) {
+            for (string const& addr : addr_list)
             {
                 std::cout << addr << endl;
             } 
@@ -268,26 +325,28 @@ int main(int argc, char *const *argv)
         {"save-state", required_argument, NULL, 'b'},
         {"load-state", required_argument, NULL, 'c'},
         {"load-data", required_argument, NULL, 'd'},
-        {"taint", required_argument, NULL, 'e'},
-        {"show-disassembly", no_argument, NULL, 'f'},
-        {"show-disassembly-regs", no_argument, NULL, 'g'},
-        {"show-disassembly-stack", no_argument, NULL, 'h'},
-        {"show-functions", no_argument, NULL, 'i'},
-        {"show-functions-regs", no_argument, NULL, 'j'},
-        {"show-functions-stack", no_argument, NULL, 'k'},
+        {"taint-reg", required_argument, NULL, 'e'},
+        {"taint-mem", required_argument, NULL, 'f'},
+        {"show-disassembly", no_argument, NULL, 'g'},
+        {"show-disassembly-regs", no_argument, NULL, 'h'},
+        {"show-disassembly-mem", no_argument, NULL, 'i'},
+        {"show-functions", no_argument, NULL, 'j'},
+        {"show-functions-regs", no_argument, NULL, 'k'},
+        {"show-functions-mem", no_argument, NULL, 'l'},
         {NULL, 0, NULL, 0}
     };
-    const char* opts = "a:b:cdefgh";
+    const char* opts = "a:b:c:d:e:f:g:hijkl";
     uint64_t domid = 0;
     bool save = false;
     const char* statefile = NULL;
     const char* datafile = NULL;
     bool show_disassembly = false;
     bool show_disassembly_regs = false;
-    bool show_disassembly_stack = false;
+    bool show_disassembly_mem = false;
     bool show_functions = false;
     bool show_functions_regs = false;
-    bool show_functions_stack = false;
+    bool show_functions_mem = false;
+    uint64_t registerid = 0;
     vector<struct taint_address> taint_addresses;
 
     while ((c = getopt_long (argc, argv, opts, long_opts, &long_index)) != -1)
@@ -308,6 +367,9 @@ int main(int argc, char *const *argv)
             datafile = optarg;
             break;
         case 'e':
+            registerid = strtoull(optarg, NULL, 0);
+            break;
+        case 'f':
         {
             string s(optarg);
             size_t pos = s.find(":");
@@ -317,29 +379,28 @@ int main(int argc, char *const *argv)
             taint_addresses.push_back({address, size});
             break;
         }
-        case 'f':
+        case 'g':
             show_disassembly = true;
             break;    
-        case 'g':
+        case 'h':
             show_disassembly_regs = true;
             break;    
-        case 'h':
-            show_disassembly_stack = true;
-            break;    
         case 'i':
+            show_disassembly_mem = true;
+            break;    
+        case 'j':
             show_functions = true;
             break;  
-        case 'j':
+        case 'k':
             show_functions_regs = true;
             break;  
-        case 'k':
-            show_functions_stack = true;
+        case 'l':
+            show_functions_mem = true;
             break;        
         default:
             return -1;
         };
     }
-
 
     if ( !statefile )
     {
@@ -378,11 +439,49 @@ int main(int argc, char *const *argv)
     triton_api.setArchitecture(ARCH_X86_64);
     triton_api.enableTaintEngine(1);
     triton_api.enableSymbolicEngine(0);
+    triton_api.setMode(modes::TAINT_THROUGH_POINTERS, true);
 
     if ( !load_state(statefile, taint_addresses) )
     {
         cout << "Unable to load state file" << endl;
         return -1;
+    }
+
+    if ( registerid ) {
+        if (registerid == 1)
+            triton_api.taintRegister(triton_api.registers.x86_rax);
+        else if (registerid == 2)
+            triton_api.taintRegister(triton_api.registers.x86_rbx);
+        else if (registerid == 3)
+            triton_api.taintRegister(triton_api.registers.x86_rcx);
+        else if (registerid == 4)
+            triton_api.taintRegister(triton_api.registers.x86_rdx);                                 
+        else if (registerid == 5)
+            triton_api.taintRegister(triton_api.registers.x86_rbp);
+        else if (registerid == 6)
+            triton_api.taintRegister(triton_api.registers.x86_rsi);
+        else if (registerid == 7)
+            triton_api.taintRegister(triton_api.registers.x86_rdi);
+        else if (registerid == 8)
+            triton_api.taintRegister(triton_api.registers.x86_rsp);
+        else if (registerid == 9)
+            triton_api.taintRegister(triton_api.registers.x86_r8);
+        else if (registerid == 10)
+            triton_api.taintRegister(triton_api.registers.x86_r9);
+        else if (registerid == 11)
+            triton_api.taintRegister(triton_api.registers.x86_r10);
+        else if (registerid == 12)
+            triton_api.taintRegister(triton_api.registers.x86_r11);
+        else if (registerid == 13)
+            triton_api.taintRegister(triton_api.registers.x86_r12);
+        else if (registerid == 14)
+            triton_api.taintRegister(triton_api.registers.x86_r13);
+        else if (registerid == 15)
+            triton_api.taintRegister(triton_api.registers.x86_r14);
+        else if (registerid == 16)
+            triton_api.taintRegister(triton_api.registers.x86_r15);
+        else if (registerid == 17)
+            triton_api.taintRegister(triton_api.registers.x86_rip);                                                                                                                                                           
     }
 
     for (unsigned int i = 0; i < taint_addresses.size(); i++)
@@ -392,8 +491,8 @@ int main(int argc, char *const *argv)
             triton_api.taintMemory(taint_addresses[i].address + s);
     }
 
-    if ( !process_data(datafile, show_disassembly, show_disassembly_regs, show_disassembly_stack,
-                show_functions, show_functions_regs, show_functions_stack ) )
+    if ( !process_data(datafile, show_disassembly, show_disassembly_regs, show_disassembly_mem,
+                show_functions, show_functions_regs, show_functions_mem ) )
     {
         cout << "Unable to process data file" << endl;
         return -1;
